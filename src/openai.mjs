@@ -22,6 +22,7 @@ export function normalizeResponsesRequest(body, config = {}) {
     upstreamModel: modelInfo.id,
     parameters,
     stream: body.stream !== false,
+    tools: responseTools(body.tools),
     messages: responseInputMessages(body),
     instructions: typeof body.instructions === "string" ? body.instructions : "",
     maxTokens: integerOr(body.max_output_tokens, config.maxTokens || 4096)
@@ -72,15 +73,16 @@ function booleanFrom(value) {
 
 export function responseInputMessages(body) {
   const messages = [];
+  const toolNamesByCallId = new Map();
   if (typeof body.instructions === "string" && body.instructions.trim()) {
     messages.push({ role: "system", text: body.instructions.trim() });
   }
-  appendInput(messages, body.input);
+  appendInput(messages, body.input, toolNamesByCallId);
   if (!messages.length) throw new AppError("invalid_request_error", "input is required", 400, "invalid_request_error");
   return messages;
 }
 
-function appendInput(messages, input) {
+function appendInput(messages, input, toolNamesByCallId) {
   if (typeof input === "string") {
     if (input.trim()) messages.push({ role: "user", text: input });
     return;
@@ -92,6 +94,22 @@ function appendInput(messages, input) {
       continue;
     }
     if (!isRecord(item)) continue;
+    if (item.type === "function_call") {
+      const callId = stringFrom(item.call_id);
+      const name = stringFrom(item.name);
+      const args = typeof item.arguments === "string" ? item.arguments : "";
+      if (callId && name) {
+        toolNamesByCallId.set(callId, name);
+        messages.push({ role: "assistant", text: "", toolCalls: [{ id: callId, name, rawArgs: args }] });
+      }
+      continue;
+    }
+    if (item.type === "function_call_output") {
+      const callId = stringFrom(item.call_id);
+      const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? "");
+      if (callId) messages.push({ role: "tool", text: "", toolResults: [{ id: callId, name: toolNamesByCallId.get(callId) || "", result: output }] });
+      continue;
+    }
     const role = typeof item.role === "string" ? item.role : "user";
     const text = contentText(item.content);
     if (text.trim()) messages.push({ role, text });
@@ -111,6 +129,21 @@ function contentText(content) {
   }).join("\n");
 }
 
+function responseTools(tools) {
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((tool) => {
+    if (!isRecord(tool) || tool.type !== "function") return [];
+    const spec = isRecord(tool.function) ? tool.function : tool;
+    const name = stringFrom(spec.name);
+    if (!name) return [];
+    return [{
+      name,
+      description: typeof spec.description === "string" ? spec.description : "",
+      parameters: isRecord(spec.parameters) ? spec.parameters : {}
+    }];
+  });
+}
+
 export class ResponseSseWriter {
   constructor(res, request, model) {
     this.res = res;
@@ -122,6 +155,10 @@ export class ResponseSseWriter {
     this.closed = false;
     this.text = "";
     this.usage = null;
+    this.outputCount = 0;
+    this.textOutputIndex = null;
+    this.toolCalls = new Map();
+    this.output = [];
   }
 
   start() {
@@ -143,37 +180,56 @@ export class ResponseSseWriter {
     this.event("response.output_text.delta", {
       type: "response.output_text.delta",
       item_id: messageItemId(this.id),
-      output_index: 0,
+      output_index: this.textOutputIndex,
       content_index: 0,
       delta: text
     });
   }
 
-  complete(usage) {
-    this.usage = usage;
-    this.ensureTextStarted();
-    const part = { type: "output_text", text: this.text, annotations: [] };
-    const item = messageItem(this.id, "completed", [part]);
-    this.event("response.output_text.done", {
-      type: "response.output_text.done",
-      item_id: messageItemId(this.id),
-      output_index: 0,
-      content_index: 0,
-      text: this.text
+  toolCallDelta(part) {
+    const call = this.ensureToolCall(part);
+    if (!part.args) return;
+    call.arguments += part.args;
+    this.event("response.function_call_arguments.delta", {
+      type: "response.function_call_arguments.delta",
+      item_id: call.item.id,
+      output_index: call.outputIndex,
+      delta: part.args
     });
-    this.event("response.content_part.done", {
-      type: "response.content_part.done",
-      item_id: messageItemId(this.id),
-      output_index: 0,
-      content_index: 0,
-      part
+  }
+
+  toolCallDone(part) {
+    const call = this.ensureToolCall(part);
+    if (part.args) {
+      call.arguments += part.args;
+      this.event("response.function_call_arguments.delta", {
+        type: "response.function_call_arguments.delta",
+        item_id: call.item.id,
+        output_index: call.outputIndex,
+        delta: part.args
+      });
+    }
+    const item = { ...call.item, status: "completed", arguments: call.arguments };
+    call.completed = true;
+    call.item = item;
+    this.output[call.outputIndex] = item;
+    this.event("response.function_call_arguments.done", {
+      type: "response.function_call_arguments.done",
+      item_id: item.id,
+      output_index: call.outputIndex,
+      arguments: call.arguments
     });
     this.event("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: 0,
+      output_index: call.outputIndex,
       item
     });
-    const output = [item];
+  }
+
+  complete(usage) {
+    this.usage = usage;
+    if (this.textStarted || this.output.length === 0) this.completeTextItem();
+    const output = this.output.filter(Boolean);
     this.event("response.completed", {
       type: "response.completed",
       response: {
@@ -187,18 +243,70 @@ export class ResponseSseWriter {
   ensureTextStarted() {
     if (this.textStarted) return;
     this.textStarted = true;
+    this.textOutputIndex = this.outputCount++;
     this.event("response.output_item.added", {
       type: "response.output_item.added",
-      output_index: 0,
+      output_index: this.textOutputIndex,
       item: messageItem(this.id, "in_progress", [])
     });
     this.event("response.content_part.added", {
       type: "response.content_part.added",
       item_id: messageItemId(this.id),
-      output_index: 0,
+      output_index: this.textOutputIndex,
       content_index: 0,
       part: { type: "output_text", text: "", annotations: [] }
     });
+  }
+
+  completeTextItem() {
+    this.ensureTextStarted();
+    const part = { type: "output_text", text: this.text, annotations: [] };
+    const item = messageItem(this.id, "completed", [part]);
+    this.output[this.textOutputIndex] = item;
+    this.event("response.output_text.done", {
+      type: "response.output_text.done",
+      item_id: messageItemId(this.id),
+      output_index: this.textOutputIndex,
+      content_index: 0,
+      text: this.text
+    });
+    this.event("response.content_part.done", {
+      type: "response.content_part.done",
+      item_id: messageItemId(this.id),
+      output_index: this.textOutputIndex,
+      content_index: 0,
+      part
+    });
+    this.event("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: this.textOutputIndex,
+      item
+    });
+  }
+
+  ensureToolCall(part) {
+    const callId = stringFrom(part.id) || `call_${this.id.slice(5)}_${this.toolCalls.size}`;
+    const existing = this.toolCalls.get(callId);
+    if (existing) return existing;
+    const outputIndex = Number.isInteger(part.index) && part.index >= 0 ? part.index : this.outputCount;
+    this.outputCount = Math.max(this.outputCount, outputIndex + 1);
+    const item = {
+      id: `fc_${crypto.randomUUID().replaceAll("-", "")}`,
+      type: "function_call",
+      status: "in_progress",
+      call_id: callId,
+      name: stringFrom(part.name) || "unknown",
+      arguments: ""
+    };
+    const call = { item, outputIndex, arguments: "", completed: false };
+    this.toolCalls.set(callId, call);
+    this.output[outputIndex] = item;
+    this.event("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item
+    });
+    return call;
   }
 
   fail(error) {
@@ -230,12 +338,15 @@ export class ResponseSseWriter {
   }
 }
 
-export function nonStreamingResponse(model, text, usage) {
+export function nonStreamingResponse(model, text, usage, toolCalls = []) {
   const id = `resp_${crypto.randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(Date.now() / 1000);
+  const output = toolCalls.length > 0
+    ? toolCalls.map((call) => functionCallItem(call, "completed"))
+    : [messageItem(id, "completed", [{ type: "output_text", text, annotations: [] }])];
   return {
     ...responseBase(id, created, model, "completed", null, usage),
-    output: [messageItem(id, "completed", [{ type: "output_text", text, annotations: [] }])]
+    output
   };
 }
 
@@ -284,6 +395,17 @@ function messageItem(id, status, content) {
 
 function messageItemId(id) {
   return `msg_${id.slice(5)}`;
+}
+
+function functionCallItem(call, status) {
+  return {
+    id: `fc_${crypto.randomUUID().replaceAll("-", "")}`,
+    type: "function_call",
+    status,
+    call_id: call.id,
+    name: call.name,
+    arguments: call.arguments || ""
+  };
 }
 
 function integerOr(value, fallback) {

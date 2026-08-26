@@ -98,6 +98,8 @@ async function streamResponse(res, runtime, request, credentials) {
   try {
     for await (const event of runtime.upstream.stream(request, credentials)) {
       if (event.type === "text") writer.delta(event.text);
+      if (event.type === "tool_call_delta") writer.toolCallDelta(event);
+      if (event.type === "tool_call_done") writer.toolCallDone(event);
       if (event.type === "done") finalState = event.state;
     }
     if (!finalState) throw new AppError("upstream_missing_terminal", "Grok Bot upstream did not return a terminal frame", 502);
@@ -110,12 +112,24 @@ async function streamResponse(res, runtime, request, credentials) {
 
 async function jsonResponse(res, runtime, request, credentials) {
   let text = "";
+  const toolCalls = new Map();
   let finalState;
   for await (const event of runtime.upstream.stream(request, credentials)) {
     if (event.type === "text") text += event.text;
+    if (event.type === "tool_call_delta" || event.type === "tool_call_done") {
+      const id = event.id || `call_${toolCalls.size}`;
+      const current = toolCalls.get(id) || { id, name: event.name || "unknown", arguments: "" };
+      if (event.name) current.name = event.name;
+      if (event.args) current.arguments += event.args;
+      toolCalls.set(id, current);
+    }
     if (event.type === "done") finalState = event.state;
   }
   if (!finalState) throw new AppError("upstream_missing_terminal", "Grok Bot upstream did not return a terminal frame", 502);
+  if (toolCalls.size > 0) {
+    json(res, 200, nonStreamingResponse(request.model, text || finalState.text, usageFromState(finalState), [...toolCalls.values()]));
+    return;
+  }
   json(res, 200, nonStreamingResponse(request.model, text || finalState.text, usageFromState(finalState)));
 }
 

@@ -1,7 +1,7 @@
 # GrokBot2API
 
 Private sidecar that translates a Grok Bot inference entitlement into a
-Grok CLI compatible Responses text API.
+Grok CLI compatible Responses API.
 
 This repository is intentionally separate from Cursor2API. Grok Bot uses the
 Cursor/Grok Bot `aiserver.v1.InferenceService/Stream` path and Grok Bot session
@@ -10,7 +10,7 @@ path. Keeping them separate makes rollback and credential boundaries clear.
 
 ## Current scope
 
-P0 implements a text-only Grok CLI/Sub2API Grok-account sidecar. The current
+P1 implements a Grok CLI/Sub2API Grok-account sidecar. The current
 Grok CLI 1.0.5 custom-model contract was verified locally: with
 `api_backend = "responses"` it sends `POST /v1/responses`,
 `Accept: text/event-stream`, and a Responses-shaped body with `input[]`,
@@ -21,6 +21,8 @@ Grok CLI 1.0.5 custom-model contract was verified locally: with
 - `GET /v1/models` and `/models`
 - `POST /v1/responses`, `/responses`, and `/backend-api/codex/responses`
 - streaming SSE for text deltas and terminal `response.completed`
+- function tool definitions, tool-call SSE events, and function-call-output
+  continuation
 - non-streaming JSON Responses output
 - 34 named catalog models in `/v1/models`, excluding `Auto`
 - real upstream usage propagation when present
@@ -31,10 +33,10 @@ Grok CLI 1.0.5 custom-model contract was verified locally: with
 - credential loading from env/file, plus macOS Grok Bot Safe Storage for local
   development
 
-It only claims Grok CLI text-stream compatibility. Tool-call round trip,
-tool-result handling, cancellation, disconnect semantics, and long-running Linux
-credential refresh are P1/P2 gates before treating it as a complete daily Grok
-CLI backend.
+It now claims Grok CLI text plus function-tool round-trip compatibility through
+local fake-upstream tests. Cancellation, disconnect semantics, rich tool result
+content, and long-running Linux credential refresh remain follow-up gates before
+treating it as a complete daily Grok CLI backend.
 
 `/v1/models` includes the 34 named models observed from the current Grok Bot
 `USER_AVAILABLE` catalog. `grok-4.5` is marked `verified`; the other catalog
