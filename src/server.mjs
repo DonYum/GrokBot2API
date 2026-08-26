@@ -13,11 +13,14 @@ import {
 import { modelList } from "./models.mjs";
 import { GrokBotInferenceClient, usageFromState } from "./upstream.mjs";
 
+const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const HARD_MAX_BODY_BYTES = 16 * 1024 * 1024;
+
 export function createApp(config = {}) {
   const runtime = {
     publicModel: config.publicModel || process.env.GROKBOT_MODEL || PUBLIC_MODEL,
     key: config.key ?? process.env.GROKBOT2API_KEY ?? "",
-    maxBodyBytes: config.maxBodyBytes || 1024 * 1024,
+    maxBodyBytes: config.maxBodyBytes || maxBodyBytesFromEnv(process.env),
     credentialProvider: config.credentialProvider || createCredentialProvider(process.env),
     upstream: config.upstream || new GrokBotInferenceClient({
       backend: process.env.GROKBOT_BACKEND,
@@ -136,6 +139,22 @@ async function readJsonBody(req, maxBytes) {
   } catch {
     throw new AppError("invalid_json", "Invalid JSON request body", 400, "invalid_request_error");
   }
+}
+
+export function maxBodyBytesFromEnv(env = process.env) {
+  const raw = env.GROKBOT_MAX_BODY_BYTES;
+  if (!raw) return DEFAULT_MAX_BODY_BYTES;
+  if (!/^\d+$/.test(raw)) {
+    throw new AppError("invalid_max_body_bytes", "GROKBOT_MAX_BODY_BYTES must be a positive integer", 503);
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (parsed <= 0) {
+    throw new AppError("invalid_max_body_bytes", "GROKBOT_MAX_BODY_BYTES must be a positive integer", 503);
+  }
+  if (parsed > HARD_MAX_BODY_BYTES) {
+    throw new AppError("max_body_bytes_too_large", `GROKBOT_MAX_BODY_BYTES must be <= ${HARD_MAX_BODY_BYTES}`, 503);
+  }
+  return parsed;
 }
 
 function logStreamError(request, error) {

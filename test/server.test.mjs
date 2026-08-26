@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { createApp } from "../src/server.mjs";
+import { createApp, maxBodyBytesFromEnv } from "../src/server.mjs";
 import { AppError } from "../src/errors.mjs";
 
 test("serves models behind bearer auth", async () => {
@@ -180,6 +180,67 @@ test("returns non-streaming Responses JSON", async () => {
   } finally {
     await close(server);
   }
+});
+
+test("keeps 1 MiB request body cap by default", async () => {
+  let calls = 0;
+  const server = await listen({
+    upstream: {
+      async *stream() {
+        calls += 1;
+        yield { type: "done", state: fakeState("") };
+      }
+    }
+  });
+  try {
+    const response = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: false,
+      input: "x".repeat(1024 * 1024)
+    }, authHeaders());
+    assert.equal(response.status, 413);
+    assert.equal(response.body.error.code, "request_too_large");
+    assert.equal(calls, 0);
+  } finally {
+    await close(server);
+  }
+});
+
+test("allows an explicit larger request body cap", async () => {
+  let calls = 0;
+  const server = await listen({
+    maxBodyBytes: 2 * 1024 * 1024,
+    upstream: {
+      async *stream() {
+        calls += 1;
+        yield { type: "done", state: fakeState("") };
+      }
+    }
+  });
+  try {
+    const response = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: false,
+      input: "x".repeat(1024 * 1024)
+    }, authHeaders());
+    assert.equal(response.status, 200);
+    assert.equal(calls, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("parses request body cap with a hard maximum", () => {
+  assert.equal(maxBodyBytesFromEnv({}), 1024 * 1024);
+  assert.equal(maxBodyBytesFromEnv({ GROKBOT_MAX_BODY_BYTES: String(8 * 1024 * 1024) }), 8 * 1024 * 1024);
+  assert.throws(
+    () => maxBodyBytesFromEnv({ GROKBOT_MAX_BODY_BYTES: "16mb" }),
+    /GROKBOT_MAX_BODY_BYTES must be a positive integer/
+  );
+  assert.throws(
+    () => maxBodyBytesFromEnv({ GROKBOT_MAX_BODY_BYTES: String(16 * 1024 * 1024 + 1) }),
+    /GROKBOT_MAX_BODY_BYTES must be <=/
+  );
 });
 
 test("limits concurrent requests", async () => {

@@ -84,6 +84,15 @@ open http://127.0.0.1:8793/dashboard
 When running behind a path proxy, set `GROKBOT_PUBLIC_BASE_URL` so the dashboard
 shows the correct client base URL.
 
+Large Grok CLI/agent requests can include tool schemas that exceed the default
+body cap. Set `GROKBOT_MAX_BODY_BYTES` only when needed:
+
+```sh
+GROKBOT_MAX_BODY_BYTES=8388608
+```
+
+The default is 1 MiB. The hard maximum is 16 MiB.
+
 ## Credential providers
 
 The sidecar reads credentials on every request and never writes credentials.
@@ -118,7 +127,8 @@ manual token copying. Until that is verified, deploy only for controlled testing
 - no key, prompt, body, or tool arguments are logged by this service;
 - 401, 403, and 429 from upstream are hard stops;
 - concurrent calls return `429 concurrency_limited`;
-- request bodies are capped;
+- request bodies are capped at 1 MiB by default and can be explicitly raised up
+  to 16 MiB with `GROKBOT_MAX_BODY_BYTES`;
 - upstream responses are capped;
 - the default bind address is loopback only.
 
