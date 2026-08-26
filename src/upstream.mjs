@@ -44,8 +44,8 @@ export class GrokBotInferenceClient {
       receivedBytes += chunk.length;
       if (receivedBytes > this.maxResponseBytes) throw new AppError("upstream_response_too_large", "Upstream response too large", 502);
       for (const frame of decoder.push(chunk)) {
-        const deltas = applyConnectFrame(frame, state);
-        for (const delta of deltas) yield { type: "text", text: delta };
+        const events = applyConnectFrame(frame, state);
+        for (const event of events) yield event;
       }
     }
     decoder.finish();

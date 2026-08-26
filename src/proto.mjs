@@ -16,9 +16,17 @@ export function varint(value) {
 export function protoField(number, wireType, value) {
   const key = varint((BigInt(number) << 3n) | BigInt(wireType));
   if (wireType === 0) return Buffer.concat([key, varint(value)]);
+  if (wireType === 1) {
+    if (!Buffer.isBuffer(value) || value.length !== 8) throw new AppError("invalid_fixed64", "Invalid fixed64", 500);
+    return Buffer.concat([key, value]);
+  }
   if (wireType === 2) {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8");
     return Buffer.concat([key, varint(bytes.length), bytes]);
+  }
+  if (wireType === 5) {
+    if (!Buffer.isBuffer(value) || value.length !== 4) throw new AppError("invalid_fixed32", "Invalid fixed32", 500);
+    return Buffer.concat([key, value]);
   }
   throw new AppError("unsupported_encode_wire_type", `Unsupported protobuf wire type ${wireType}`, 500);
 }
@@ -34,8 +42,13 @@ export function connectEnvelope(message, flags = 0) {
   return Buffer.concat([header, message]);
 }
 
-export function coreMessage(role, text) {
-  return protoMessage([protoField(1, 0, role), protoField(2, 2, text)]);
+export function coreMessage(role, text, calls = [], results = []) {
+  const fields = [protoField(1, 0, role)];
+  if (text) fields.push(protoField(2, 2, text));
+  for (const toolCall of toolCalls(role, calls)) fields.push(protoField(4, 2, toolCall));
+  const toolContent = toolResultContent(results);
+  if (toolContent) fields.push(protoField(6, 2, toolContent));
+  return protoMessage(fields);
 }
 
 export function modelParameter(id, value) {
@@ -50,7 +63,8 @@ export function buildInferenceRequest(input) {
   ]);
   const modelConfig = protoMessage([protoField(1, 0, input.maxTokens || 4096)]);
   return protoMessage([
-    ...input.messages.map((message) => protoField(1, 2, coreMessage(roleNumber(message.role), message.text))),
+    ...input.messages.map((message) => protoField(1, 2, coreMessage(roleNumber(message.role), message.text, message.toolCalls, message.toolResults))),
+    ...agentTools(input.tools).map((tool) => protoField(2, 2, tool)),
     protoField(4, 2, modelConfig),
     protoField(6, 2, input.invocationId),
     protoField(7, 2, requestedModel),
@@ -69,8 +83,86 @@ function modelParameters(parameters = {}) {
 
 function roleNumber(role) {
   if (role === "assistant") return 2;
+  if (role === "tool") return 3;
   if (role === "system" || role === "developer") return 4;
   return 1;
+}
+
+function agentTools(tools = []) {
+  return tools.flatMap((tool) => {
+    if (!tool?.name) return [];
+    return [protoMessage([
+      protoField(1, 2, tool.name),
+      protoField(2, 2, tool.description || ""),
+      protoField(3, 2, structValue(tool.parameters || {}))
+    ])];
+  });
+}
+
+function toolCalls(role, calls = []) {
+  if (role !== 2 || !Array.isArray(calls)) return [];
+  return calls.flatMap((call) => {
+    if (!call?.id || !call?.name) return [];
+    const fields = [
+      protoField(1, 2, call.id),
+      protoField(2, 2, call.name)
+    ];
+    const parsed = jsonObject(call.rawArgs);
+    if (parsed) fields.push(protoField(3, 2, structValue(parsed)));
+    if (typeof call.rawArgs === "string") fields.push(protoField(4, 2, call.rawArgs));
+    return [protoMessage(fields)];
+  });
+}
+
+function toolResultContent(results = []) {
+  if (!Array.isArray(results) || !results.length) return null;
+  return protoMessage(results.flatMap((result) => {
+    if (!result?.id) return [];
+    return [protoField(1, 2, protoMessage([
+      protoField(1, 2, result.id),
+      ...(result.name ? [protoField(2, 2, result.name)] : []),
+      protoField(3, 2, valueMessage(result.result ?? "")),
+      ...(result.isError ? [protoField(4, 0, 1)] : [])
+    ]))];
+  }));
+}
+
+function jsonObject(text) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function structValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return protoMessage([]);
+  return protoMessage(Object.entries(value).map(([key, item]) => {
+    return protoField(1, 2, protoMessage([
+      protoField(1, 2, key),
+      protoField(2, 2, valueMessage(item))
+    ]));
+  }));
+}
+
+function valueMessage(value) {
+  if (value === null || value === undefined) return protoField(1, 0, 0);
+  if (typeof value === "number" && Number.isFinite(value)) return protoField(2, 1, doubleBytes(value));
+  if (typeof value === "string") return protoField(3, 2, value);
+  if (typeof value === "boolean") return protoField(4, 0, value ? 1 : 0);
+  if (Array.isArray(value)) {
+    return protoField(6, 2, protoMessage(value.map((item) => protoField(1, 2, valueMessage(item)))));
+  }
+  if (typeof value === "object") return protoField(5, 2, structValue(value));
+  return protoField(3, 2, String(value));
+}
+
+function doubleBytes(value) {
+  const buffer = Buffer.alloc(8);
+  buffer.writeDoubleLE(value, 0);
+  return buffer;
 }
 
 export function readVarint(bytes, start) {
@@ -135,6 +227,8 @@ export function decodeResponseFrame(bytes, state = emptyDecodeState()) {
       }
     } else if (response.number === 2) {
       state.toolCallFrames += 1;
+      const toolCall = toolCallPart(nested);
+      if (toolCall) state.toolCallDeltas.push(toolCall);
     } else if (response.number === 3) {
       const usage = numericFields(response.value);
       state.usage = {
@@ -176,6 +270,7 @@ export function emptyDecodeState() {
     endFrames: 0,
     kinds: new Set(),
     deltas: [],
+    toolCallDeltas: [],
     text: "",
     usage: null,
     extendedUsage: null,
@@ -227,12 +322,35 @@ export function applyConnectFrame(frame, state) {
     return [];
   }
   const before = state.deltas.length;
+  const beforeTools = state.toolCallDeltas.length;
   decodeResponseFrame(frame.payload, state);
-  return state.deltas.slice(before);
+  return [
+    ...state.deltas.slice(before).map((text) => ({ type: "text", text })),
+    ...state.toolCallDeltas.slice(beforeTools).map((part) => ({
+      type: part.isComplete ? "tool_call_done" : "tool_call_delta",
+      ...part
+    }))
+  ];
 }
 
 function utf8(field) {
   return Buffer.from(field.value).toString("utf8");
+}
+
+function toolCallPart(fields) {
+  const id = fields.find((field) => field.number === 1 && field.wireType === 2);
+  const name = fields.find((field) => field.number === 2 && field.wireType === 2);
+  const args = fields.find((field) => field.number === 3 && field.wireType === 2);
+  const complete = fields.find((field) => field.number === 4 && field.wireType === 0);
+  const index = fields.find((field) => field.number === 5 && field.wireType === 0);
+  if (!id && !name && !args && !complete) return null;
+  return {
+    id: id ? utf8(id) : "",
+    name: name ? utf8(name) : "",
+    args: args ? utf8(args) : "",
+    isComplete: complete ? complete.value !== 0n : false,
+    index: index ? Number(index.value) : null
+  };
 }
 
 function numericFields(bytes) {

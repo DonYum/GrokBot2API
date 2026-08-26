@@ -37,6 +37,36 @@ test("current Grok CLI can consume the sidecar Responses stream", { skip: !exist
   }
 });
 
+test("current Grok CLI executes a Responses function call and returns tool output", { skip: !existsSync(grokCliPath()) }, async () => {
+  const seen = [];
+  const server = await listen({
+    upstream: {
+      async *stream(request) {
+        seen.push({
+          tools: request.tools.map((tool) => tool.name),
+          hasToolResult: request.messages.some((message) => Array.isArray(message.toolResults) && message.toolResults.length > 0)
+        });
+        if (request.tools.some((tool) => tool.name === "list_dir") && !seen.at(-1).hasToolResult) {
+          yield { type: "tool_call_done", id: "call_list", name: "list_dir", args: "{\"target_directory\":\".\"}", index: 0 };
+          yield { type: "done", state: fakeState("") };
+          return;
+        }
+        yield { type: "text", text: "GROK_CLI_TOOL_ROUNDTRIP_OK" };
+        yield { type: "done", state: fakeState("GROK_CLI_TOOL_ROUNDTRIP_OK") };
+      }
+    }
+  });
+  try {
+    const result = await runGrokCli(server, { prompt: "List files in the current directory." });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /GROK_CLI_TOOL_ROUNDTRIP_OK/);
+    assert.equal(seen.some((request) => request.tools.includes("list_dir")), true);
+    assert.equal(seen.some((request) => request.hasToolResult), true);
+  } finally {
+    await close(server);
+  }
+});
+
 function listen(config = {}) {
   const app = createApp({
     publicModel: "grok-4.5",
@@ -57,12 +87,14 @@ function listen(config = {}) {
   });
 }
 
-function runGrokCli(server) {
+function runGrokCli(server, options = {}) {
   const home = mkdtempSync(join(tmpdir(), "grokbot2api-cli-"));
   mkdirSync(join(home, ".grok"), { recursive: true });
+  writeFileSync(join(home, "fixture.txt"), "fixture");
   writeFileSync(join(home, ".grok", "config.toml"), grokConfig(server.address().port));
   return new Promise((resolve, reject) => {
-    const child = spawn(grokCliPath(), ["--no-alt-screen", "-p", "compat ping", "-m", "local-grok"], {
+    const child = spawn(grokCliPath(), ["--no-alt-screen", "-p", options.prompt || "compat ping", "-m", "local-grok"], {
+      cwd: home,
       env: {
         ...process.env,
         HOME: home,

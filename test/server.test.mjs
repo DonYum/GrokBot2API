@@ -78,6 +78,94 @@ test("streams Grok CLI compatible Responses text events with terminal usage", as
   }
 });
 
+test("streams Responses function call events from upstream tool calls", async () => {
+  const seen = [];
+  const server = await listen({
+    upstream: {
+      async *stream(request) {
+        seen.push(request);
+        yield { type: "tool_call_delta", id: "call_1", name: "list_dir", args: "{\"target_directory\"", index: 0 };
+        yield { type: "tool_call_done", id: "call_1", name: "list_dir", args: ":\".\"}", index: 0 };
+        yield { type: "done", state: fakeState("") };
+      }
+    }
+  });
+  try {
+    const response = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: true,
+      tools: [{
+        type: "function",
+        function: {
+          name: "list_dir",
+          description: "List a directory.",
+          parameters: { type: "object", properties: { target_directory: { type: "string" } } }
+        }
+      }],
+      input: [{ role: "user", content: [{ type: "input_text", text: "List files." }] }]
+    }, authHeaders());
+    assert.equal(response.status, 200);
+    assert.equal(seen[0].tools.length, 1);
+    assert.equal(seen[0].tools[0].name, "list_dir");
+    const events = parseSse(response.raw);
+    assert.deepEqual(events.map((event) => event.event), [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed"
+    ]);
+    assert.deepEqual(events.map((event) => event.data.sequence_number), [0, 1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(events[2].data.item.type, "function_call");
+    assert.equal(events[2].data.item.call_id, "call_1");
+    assert.equal(events[2].data.item.name, "list_dir");
+    assert.equal(events[5].data.arguments, "{\"target_directory\":\".\"}");
+    assert.equal(events.at(-1).data.response.output[0].type, "function_call");
+  } finally {
+    await close(server);
+  }
+});
+
+test("normalizes function call outputs for upstream continuation", async () => {
+  const seen = [];
+  const server = await listen({
+    upstream: {
+      async *stream(request) {
+        seen.push(request);
+        yield { type: "done", state: fakeState("") };
+      }
+    }
+  });
+  try {
+    const response = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: false,
+      tools: [{
+        type: "function",
+        function: {
+          name: "list_dir",
+          description: "List a directory.",
+          parameters: { type: "object", properties: { target_directory: { type: "string" } } }
+        }
+      }],
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "List files." }] },
+        { type: "function_call", call_id: "call_1", name: "list_dir", arguments: "{\"target_directory\":\".\"}" },
+        { type: "function_call_output", call_id: "call_1", output: "README.md" }
+      ]
+    }, authHeaders());
+    assert.equal(response.status, 200);
+    assert.equal(seen[0].tools[0].name, "list_dir");
+    assert.deepEqual(seen[0].messages.at(-2).toolCalls, [{ id: "call_1", name: "list_dir", rawArgs: "{\"target_directory\":\".\"}" }]);
+    assert.deepEqual(seen[0].messages.at(-1).toolResults, [{ id: "call_1", name: "list_dir", result: "README.md" }]);
+  } finally {
+    await close(server);
+  }
+});
+
 test("maps model parameters for catalog models", async () => {
   const seen = [];
   const server = await listen({
