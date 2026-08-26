@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { createApp, maxBodyBytesFromEnv } from "../src/server.mjs";
+import { createApp, maxBodyBytesFromEnv, rateLimitCooldownMsFromEnv } from "../src/server.mjs";
 import { AppError } from "../src/errors.mjs";
 
 test("serves models behind bearer auth", async () => {
@@ -331,6 +331,20 @@ test("parses request body cap with a hard maximum", () => {
   );
 });
 
+test("parses rate limit cooldown with a hard maximum", () => {
+  assert.equal(rateLimitCooldownMsFromEnv({}), 30_000);
+  assert.equal(rateLimitCooldownMsFromEnv({ GROKBOT_RATE_LIMIT_COOLDOWN_MS: "0" }), 0);
+  assert.equal(rateLimitCooldownMsFromEnv({ GROKBOT_RATE_LIMIT_COOLDOWN_MS: "1000" }), 1000);
+  assert.throws(
+    () => rateLimitCooldownMsFromEnv({ GROKBOT_RATE_LIMIT_COOLDOWN_MS: "30s" }),
+    /GROKBOT_RATE_LIMIT_COOLDOWN_MS must be a non-negative integer/
+  );
+  assert.throws(
+    () => rateLimitCooldownMsFromEnv({ GROKBOT_RATE_LIMIT_COOLDOWN_MS: String(5 * 60_000 + 1) }),
+    /GROKBOT_RATE_LIMIT_COOLDOWN_MS must be <=/
+  );
+});
+
 test("limits concurrent requests", async () => {
   let release;
   const server = await listen({
@@ -352,6 +366,40 @@ test("limits concurrent requests", async () => {
   }
 });
 
+test("maps non-streaming upstream resource exhaustion to 429 and cools down", async () => {
+  let calls = 0;
+  const server = await listen({
+    rateLimitCooldownMs: 60_000,
+    upstream: {
+      async *stream() {
+        calls += 1;
+        throw new AppError("resource_exhausted", "upstream exhausted", 502);
+      }
+    }
+  });
+  try {
+    const first = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: false,
+      input: "Say ok."
+    }, authHeaders());
+    assert.equal(first.status, 429);
+    assert.equal(first.body.error.type, "rate_limit_error");
+    assert.equal(first.body.error.code, "upstream_rate_limited");
+
+    const second = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: false,
+      input: "Say ok again."
+    }, authHeaders());
+    assert.equal(second.status, 429);
+    assert.equal(second.body.error.code, "upstream_rate_limited");
+    assert.equal(calls, 1);
+  } finally {
+    await close(server);
+  }
+});
+
 test("maps upstream stream failures to SSE error events", async () => {
   const server = await listen({
     upstream: fakeUpstream(async function* () {
@@ -367,8 +415,43 @@ test("maps upstream stream failures to SSE error events", async () => {
     const events = parseSse(response.raw);
     assert.equal(response.status, 200);
     assert.equal(events.at(-1).event, "error");
-    assert.equal(events.at(-1).data.error.code, "hard_stop_http_429");
-    assert.equal(events.at(-1).data.error.status, 503);
+    assert.equal(events.at(-1).data.error.type, "rate_limit_error");
+    assert.equal(events.at(-1).data.error.code, "upstream_rate_limited");
+    assert.equal(events.at(-1).data.error.status, 429);
+  } finally {
+    await close(server);
+  }
+});
+
+test("maps streaming upstream resource exhaustion to SSE 429 and cools down", async () => {
+  let calls = 0;
+  const server = await listen({
+    rateLimitCooldownMs: 60_000,
+    upstream: fakeUpstream(async function* () {
+      calls += 1;
+      yield { type: "text", text: "partial" };
+      throw new AppError("resource_exhausted", "upstream exhausted", 502);
+    })
+  });
+  try {
+    const first = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      input: "Say ok."
+    }, authHeaders());
+    const events = parseSse(first.raw);
+    assert.equal(first.status, 200);
+    assert.equal(events.at(-1).event, "error");
+    assert.equal(events.at(-1).data.error.type, "rate_limit_error");
+    assert.equal(events.at(-1).data.error.code, "upstream_rate_limited");
+    assert.equal(events.at(-1).data.error.status, 429);
+
+    const second = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      input: "Say ok again."
+    }, authHeaders());
+    assert.equal(second.status, 429);
+    assert.equal(second.body.error.code, "upstream_rate_limited");
+    assert.equal(calls, 1);
   } finally {
     await close(server);
   }

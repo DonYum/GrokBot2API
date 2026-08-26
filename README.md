@@ -28,6 +28,7 @@ Grok CLI 1.0.5 custom-model contract was verified locally: with
 - real upstream usage propagation when present
 - structured error mapping
 - single in-flight request guard
+- short in-process cooldown after upstream rate-limit/resource-exhausted errors
 - Bearer downstream key
 - loopback bind by default
 - credential loading from env/file, plus macOS Grok Bot Safe Storage for local
@@ -95,6 +96,17 @@ GROKBOT_MAX_BODY_BYTES=8388608
 
 The default is 1 MiB. The hard maximum is 16 MiB.
 
+When upstream returns HTTP 429 or a Connect end-frame `resource_exhausted`, the
+sidecar maps it to OpenAI-style `rate_limit_error` / 429 and briefly cools down
+before accepting another upstream request:
+
+```sh
+GROKBOT_RATE_LIMIT_COOLDOWN_MS=30000
+```
+
+The default is 30 seconds. Set it to `0` to disable. The hard maximum is 5
+minutes. This cooldown is process-local and resets on restart.
+
 ## Credential providers
 
 The sidecar reads credentials on every request and never writes credentials.
@@ -129,6 +141,8 @@ manual token copying. Until that is verified, deploy only for controlled testing
 - no key, prompt, body, or tool arguments are logged by this service;
 - 401, 403, and 429 from upstream are hard stops;
 - concurrent calls return `429 concurrency_limited`;
+- upstream 429 / `resource_exhausted` returns `429 upstream_rate_limited` and
+  starts a short in-process cooldown;
 - request bodies are capped at 1 MiB by default and can be explicitly raised up
   to 16 MiB with `GROKBOT_MAX_BODY_BYTES`;
 - upstream responses are capped;

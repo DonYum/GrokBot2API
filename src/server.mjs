@@ -1,6 +1,6 @@
 import http from "node:http";
 import { createCredentialProvider } from "./credentials.mjs";
-import { AppError, errorFromUnknown } from "./errors.mjs";
+import { AppError, errorFromUnknown, isRateLimitLikeError, rateLimitError } from "./errors.mjs";
 import {
   json,
   jsonError,
@@ -15,19 +15,23 @@ import { GrokBotInferenceClient, usageFromState } from "./upstream.mjs";
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const HARD_MAX_BODY_BYTES = 16 * 1024 * 1024;
+const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 30_000;
+const HARD_RATE_LIMIT_COOLDOWN_MS = 5 * 60_000;
 
 export function createApp(config = {}) {
   const runtime = {
     publicModel: config.publicModel || process.env.GROKBOT_MODEL || PUBLIC_MODEL,
     key: config.key ?? process.env.GROKBOT2API_KEY ?? "",
     maxBodyBytes: config.maxBodyBytes || maxBodyBytesFromEnv(process.env),
+    rateLimitCooldownMs: config.rateLimitCooldownMs ?? rateLimitCooldownMsFromEnv(process.env),
     credentialProvider: config.credentialProvider || createCredentialProvider(process.env),
     upstream: config.upstream || new GrokBotInferenceClient({
       backend: process.env.GROKBOT_BACKEND,
       upstreamModel: process.env.GROKBOT_UPSTREAM_MODEL || "grok-4.5",
       timeoutMs: Number.parseInt(process.env.GROKBOT_UPSTREAM_TIMEOUT_MS || "", 10) || 90_000
     }),
-    active: false
+    active: false,
+    cooldownUntil: 0
   };
 
   return async function app(req, res) {
@@ -73,6 +77,9 @@ export function startServer(config = {}) {
 }
 
 async function handleResponses(req, res, runtime) {
+  if (runtime.cooldownUntil > Date.now()) {
+    throw rateLimitError("Grok Bot upstream is cooling down after rate limit; retry later");
+  }
   if (runtime.active) {
     throw new AppError("concurrency_limited", "Only one Grok Bot request may run at a time", 429, "rate_limit_error");
   }
@@ -86,6 +93,10 @@ async function handleResponses(req, res, runtime) {
     } else {
       await jsonResponse(res, runtime, request, credentials);
     }
+  } catch (error) {
+    const appError = appErrorForClient(error);
+    applyRateLimitCooldown(runtime, appError);
+    throw appError;
   } finally {
     runtime.active = false;
   }
@@ -105,8 +116,10 @@ async function streamResponse(res, runtime, request, credentials) {
     if (!finalState) throw new AppError("upstream_missing_terminal", "Grok Bot upstream did not return a terminal frame", 502);
     writer.complete(usageFromState(finalState));
   } catch (error) {
-    logStreamError(request, error);
-    writer.fail(error);
+    const appError = appErrorForClient(error);
+    applyRateLimitCooldown(runtime, appError);
+    logStreamError(request, appError);
+    writer.fail(appError);
   }
 }
 
@@ -171,6 +184,29 @@ export function maxBodyBytesFromEnv(env = process.env) {
   return parsed;
 }
 
+export function rateLimitCooldownMsFromEnv(env = process.env) {
+  const raw = env.GROKBOT_RATE_LIMIT_COOLDOWN_MS;
+  if (!raw) return DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+  if (!/^\d+$/.test(raw)) {
+    throw new AppError("invalid_rate_limit_cooldown_ms", "GROKBOT_RATE_LIMIT_COOLDOWN_MS must be a non-negative integer", 503);
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (parsed > HARD_RATE_LIMIT_COOLDOWN_MS) {
+    throw new AppError("rate_limit_cooldown_ms_too_large", `GROKBOT_RATE_LIMIT_COOLDOWN_MS must be <= ${HARD_RATE_LIMIT_COOLDOWN_MS}`, 503);
+  }
+  return parsed;
+}
+
+function appErrorForClient(error) {
+  const appError = errorFromUnknown(error, "upstream_error");
+  return isRateLimitLikeError(appError) ? rateLimitError() : appError;
+}
+
+function applyRateLimitCooldown(runtime, error) {
+  if (!runtime.rateLimitCooldownMs || !isRateLimitLikeError(error)) return;
+  runtime.cooldownUntil = Date.now() + runtime.rateLimitCooldownMs;
+}
+
 function logStreamError(request, error) {
   const appError = errorFromUnknown(error, "upstream_error");
   console.error(JSON.stringify({
@@ -190,6 +226,7 @@ function healthPayload(runtime) {
     default_model: runtime.publicModel,
     model_count: modelList().length,
     active: runtime.active,
+    cooldown_active: runtime.cooldownUntil > Date.now(),
     auth_configured: Boolean(runtime.key)
   };
 }

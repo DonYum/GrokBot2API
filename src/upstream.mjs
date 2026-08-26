@@ -8,7 +8,7 @@ import {
   emptyDecodeState
 } from "./proto.mjs";
 import { cursorChecksum } from "./credentials.mjs";
-import { AppError, hardStopStatus } from "./errors.mjs";
+import { AppError, hardStopStatus, rateLimitError } from "./errors.mjs";
 
 const BACKEND = new URL("https://api2.cursor.sh/aiserver.v1.InferenceService/Stream");
 
@@ -25,6 +25,9 @@ export class GrokBotInferenceClient {
     const body = buildUpstreamRequestBody(request, this.upstreamModel);
     const response = await this.open(credentials, body);
     if (response.status !== 200) {
+      if (response.status === 429) {
+        throw rateLimitError();
+      }
       if (hardStopStatus(response.status)) {
         throw new AppError(`hard_stop_http_${response.status}`, `Grok Bot upstream returned ${response.status}`, 503);
       }
@@ -44,6 +47,10 @@ export class GrokBotInferenceClient {
     decoder.finish();
     if (state.errors.length > 0) {
       const first = state.errors[0];
+      const code = String(first.code || "").toLowerCase();
+      if (code === "resource_exhausted" || code === "rate_limited") {
+        throw rateLimitError();
+      }
       throw new AppError(String(first.code || "upstream_stream_error"), first.message || "Grok Bot upstream stream error", 502);
     }
     yield { type: "done", state };
