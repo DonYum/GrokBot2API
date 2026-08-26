@@ -22,14 +22,7 @@ export class GrokBotInferenceClient {
 
   async *stream(request, credentials) {
     const state = emptyDecodeState();
-    const body = connectEnvelope(buildInferenceRequest({
-      messages: request.messages,
-      upstreamModel: request.upstreamModel || this.upstreamModel,
-      parameters: request.parameters,
-      maxTokens: request.maxTokens,
-      invocationId: crypto.randomUUID(),
-      conversationId: crypto.randomUUID()
-    }));
+    const body = buildUpstreamRequestBody(request, this.upstreamModel);
     const response = await this.open(credentials, body);
     if (response.status !== 200) {
       if (hardStopStatus(response.status)) {
@@ -82,6 +75,18 @@ export class GrokBotInferenceClient {
       request.end(body);
     });
   }
+}
+
+export function buildUpstreamRequestBody(request, upstreamModel) {
+  return connectEnvelope(buildInferenceRequest({
+    messages: request.messages,
+    tools: request.tools,
+    upstreamModel: request.upstreamModel || upstreamModel,
+    parameters: request.parameters,
+    maxTokens: request.maxTokens,
+    invocationId: crypto.randomUUID(),
+    conversationId: crypto.randomUUID()
+  }));
 }
 
 export function usageFromState(state) {
