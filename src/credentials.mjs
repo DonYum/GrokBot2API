@@ -35,8 +35,41 @@ export function loadCredentials(env = process.env) {
       clientVersion: stringField(parsed, "clientVersion") || env.GROKBOT_CLIENT_VERSION || "0.27.0"
     };
   }
+  if (env.GROKBOT_CREDENTIALS_COMMAND) return loadCommandCredentials(env);
   if (process.platform === "darwin") return loadMacSafeStorage(env);
   throw new AppError("credentials_not_configured", "Grok Bot credentials are not configured for this host", 503);
+}
+
+function loadCommandCredentials(env = process.env) {
+  const command = env.GROKBOT_CREDENTIALS_COMMAND;
+  if (!path.isAbsolute(command)) {
+    throw new AppError("credentials_command_not_absolute", "GROKBOT_CREDENTIALS_COMMAND must be an absolute path", 503);
+  }
+  const result = spawnSync(command, [], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: positiveInteger(env.GROKBOT_CREDENTIALS_COMMAND_TIMEOUT_MS, 5000),
+    maxBuffer: 64 * 1024
+  });
+  if (result.error) {
+    const code = result.error.code === "ETIMEDOUT" ? "credentials_command_timeout" : "credentials_command_failed";
+    throw new AppError(code, "Grok Bot credential command failed", 503);
+  }
+  if (result.status !== 0) {
+    throw new AppError("credentials_command_failed", "Grok Bot credential command failed", 503);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout || "{}");
+  } catch {
+    throw new AppError("credentials_command_invalid_output", "Grok Bot credential command returned invalid JSON", 503);
+  }
+  return {
+    source: "command",
+    accessToken: stringField(parsed, "accessToken"),
+    machineId: stringField(parsed, "machineId"),
+    clientVersion: stringField(parsed, "clientVersion") || env.GROKBOT_CLIENT_VERSION || "0.27.0"
+  };
 }
 
 function loadMacSafeStorage(env = process.env) {
@@ -107,4 +140,9 @@ export function jwtPayload(token) {
 
 function stringField(record, key) {
   return typeof record?.[key] === "string" ? record[key] : "";
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

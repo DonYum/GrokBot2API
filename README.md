@@ -92,7 +92,20 @@ Provider order:
 
 1. `GROKBOT_ACCESS_TOKEN` + `GROKBOT_MACHINE_ID`
 2. `GROKBOT_CREDENTIALS_FILE`
-3. macOS Grok Bot Safe Storage, only on Darwin
+3. `GROKBOT_CREDENTIALS_COMMAND`
+4. macOS Grok Bot Safe Storage, only on Darwin
+
+`GROKBOT_CREDENTIALS_COMMAND` is the preferred Linux bootstrap/refresh boundary.
+It must be an absolute path, is executed without a shell on every request, and
+must print a single JSON object:
+
+```json
+{"accessToken":"eyJ...","machineId":"...","clientVersion":"0.27.0"}
+```
+
+The sidecar validates token shape/expiry and machine id, then discards the
+values after the request. It does not log command stdout/stderr, so helper errors
+must be monitored at the helper/runtime layer.
 
 For `.212` Linux deployment, first validate a Linux Grok Bot runtime such as
 `Nichokas/grokbot-linux-port` in an isolated directory. The important gate is not
