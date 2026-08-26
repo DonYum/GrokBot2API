@@ -6,6 +6,7 @@ import {
   connectEnvelope,
   ConnectFrameDecoder,
   emptyDecodeState,
+  parseProto,
   protoField,
   protoMessage
 } from "../src/proto.mjs";
@@ -71,6 +72,12 @@ test("encodes function tools and decodes tool call stream parts", () => {
   assert.match(request.toString("utf8"), /list_dir/);
   assert.match(request.toString("utf8"), /target_directory/);
   assert.match(request.toString("utf8"), /README\.md/);
+  assert.deepEqual(
+    parseProto(request)
+      .filter((field) => field.number === 9)
+      .map((field) => Buffer.from(field.value).toString("utf8")),
+    ["list_dir"]
+  );
 
   const toolFrame = protoMessage([protoField(2, 2, protoMessage([
     protoField(1, 2, "call_1"),
