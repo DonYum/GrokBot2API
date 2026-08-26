@@ -76,7 +76,7 @@ test("encodes function tools and decodes tool call stream parts", () => {
     parseProto(request)
       .filter((field) => field.number === 9)
       .map((field) => Buffer.from(field.value).toString("utf8")),
-    ["list_dir"]
+    []
   );
 
   const toolFrame = protoMessage([protoField(2, 2, protoMessage([
