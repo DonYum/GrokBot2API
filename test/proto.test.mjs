@@ -15,6 +15,7 @@ test("encodes an inference request and decodes text/usage frames", () => {
     upstreamModel: "grok-4.5",
     invocationId: "00000000-0000-4000-8000-000000000001",
     conversationId: "00000000-0000-4000-8000-000000000002",
+    parameters: { effort: "xhigh", fast: false },
     messages: [
       { role: "system", text: "Follow instructions." },
       { role: "user", text: "Say ok." }
@@ -22,6 +23,9 @@ test("encodes an inference request and decodes text/usage frames", () => {
     maxTokens: 256
   });
   assert.ok(request.length > 0);
+  assert.match(request.toString("utf8"), /grok-4\.5/);
+  assert.match(request.toString("utf8"), /xhigh/);
+  assert.match(request.toString("utf8"), /false/);
 
   const textFrame = protoMessage([protoField(1, 2, protoMessage([protoField(1, 2, "hello")]))]);
   const usageFrame = protoMessage([protoField(3, 2, protoMessage([

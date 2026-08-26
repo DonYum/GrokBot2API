@@ -29,7 +29,8 @@ test("current Grok CLI can consume the sidecar Responses stream", { skip: !exist
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /GROK_CLI_COMPAT_OK/);
     assert.ok(seen.length >= 1);
-    assert.ok(seen.every((request) => request.model === "grok-4.5"));
+    assert.ok(seen.some((request) => request.model === "grok-4.5"));
+    assert.ok(seen.every((request) => ["grok-4.5", "grok-4.6"].includes(request.model)));
     assert.ok(seen.some((request) => request.messageCount >= 1));
   } finally {
     await close(server);

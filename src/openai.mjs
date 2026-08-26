@@ -1,31 +1,73 @@
 import crypto from "node:crypto";
 import { AppError, errorFromUnknown, openAiError } from "./errors.mjs";
+import { DEFAULT_MODEL_ID, modelById, modelList } from "./models.mjs";
 
-export const PUBLIC_MODEL = process.env.GROKBOT_MODEL || "grok-4.5";
+export const PUBLIC_MODEL = process.env.GROKBOT_MODEL || DEFAULT_MODEL_ID;
 
-export function modelsResponse(model = PUBLIC_MODEL) {
+export function modelsResponse() {
   return {
     object: "list",
-    data: [{
-      id: model,
-      object: "model",
-      created: 0,
-      owned_by: "grokbot2api"
-    }]
+    data: modelList()
   };
 }
 
 export function normalizeResponsesRequest(body, config = {}) {
   if (!isRecord(body)) throw new AppError("invalid_request_error", "Request body must be a JSON object", 400, "invalid_request_error");
-  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : config.publicModel;
-  if (model !== config.publicModel) throw new AppError("model_not_found", `Model '${model}' is not available`, 404, "invalid_request_error");
+  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : config.defaultModel || PUBLIC_MODEL;
+  const modelInfo = modelById(model);
+  if (!modelInfo) throw new AppError("model_not_found", `Model '${model}' is not available`, 404, "invalid_request_error");
+  const parameters = requestModelParameters(body, modelInfo);
   return {
     model,
+    upstreamModel: modelInfo.id,
+    parameters,
     stream: body.stream !== false,
     messages: responseInputMessages(body),
     instructions: typeof body.instructions === "string" ? body.instructions : "",
     maxTokens: integerOr(body.max_output_tokens, config.maxTokens || 4096)
   };
+}
+
+function requestModelParameters(body, modelInfo) {
+  const parameters = { ...(modelInfo.defaults || {}) };
+  const explicitEffort = stringFrom(body.effort) || stringFrom(body.reasoning?.effort);
+  if (explicitEffort) setEffortParameter(parameters, modelInfo, explicitEffort);
+  const fast = booleanFrom(body.fast);
+  if (fast !== undefined) {
+    if (!modelInfo.fast) throw new AppError("unsupported_model_parameter", `Model '${modelInfo.id}' does not support fast`, 400, "invalid_request_error");
+    parameters.fast = fast;
+  }
+  const thinking = booleanFrom(body.thinking);
+  if (thinking !== undefined) {
+    if (!modelInfo.thinking) throw new AppError("unsupported_model_parameter", `Model '${modelInfo.id}' does not support thinking`, 400, "invalid_request_error");
+    parameters.thinking = thinking;
+  }
+  const context = integerOr(body.context, 0);
+  if (context > 0) {
+    if (!modelInfo.contexts?.includes(context)) throw new AppError("unsupported_model_parameter", `Model '${modelInfo.id}' does not support context ${context}`, 400, "invalid_request_error");
+    parameters.context = context;
+  }
+  return parameters;
+}
+
+function setEffortParameter(parameters, modelInfo, effort) {
+  if (!modelInfo.effortParameter || !modelInfo.efforts?.length) {
+    throw new AppError("unsupported_model_parameter", `Model '${modelInfo.id}' does not support effort`, 400, "invalid_request_error");
+  }
+  if (!modelInfo.efforts.includes(effort)) {
+    throw new AppError("unsupported_model_parameter", `Model '${modelInfo.id}' does not support effort '${effort}'`, 400, "invalid_request_error");
+  }
+  parameters[modelInfo.effortParameter] = effort;
+}
+
+function stringFrom(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function booleanFrom(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string" && ["true", "false"].includes(value.toLowerCase())) return value.toLowerCase() === "true";
+  return undefined;
 }
 
 export function responseInputMessages(body) {

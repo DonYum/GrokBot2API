@@ -46,8 +46,7 @@ export function buildInferenceRequest(input) {
   const requestedModel = protoMessage([
     protoField(1, 2, input.upstreamModel),
     protoField(2, 0, 1),
-    protoField(3, 2, modelParameter("effort", input.effort || "high")),
-    protoField(3, 2, modelParameter("fast", input.fast === false ? "false" : "true"))
+    ...modelParameters(input.parameters).map(([id, value]) => protoField(3, 2, modelParameter(id, value)))
   ]);
   const modelConfig = protoMessage([protoField(1, 0, input.maxTokens || 4096)]);
   return protoMessage([
@@ -57,6 +56,15 @@ export function buildInferenceRequest(input) {
     protoField(7, 2, requestedModel),
     protoField(8, 2, input.conversationId)
   ]);
+}
+
+function modelParameters(parameters = {}) {
+  return Object.entries(parameters).flatMap(([id, value]) => {
+    if (typeof value === "boolean") return [[id, value ? "true" : "false"]];
+    if (typeof value === "number" && Number.isFinite(value)) return [[id, String(value)]];
+    if (typeof value === "string" && value) return [[id, value]];
+    return [];
+  });
 }
 
 function roleNumber(role) {

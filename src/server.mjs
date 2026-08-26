@@ -10,6 +10,7 @@ import {
   PUBLIC_MODEL,
   ResponseSseWriter
 } from "./openai.mjs";
+import { modelList } from "./models.mjs";
 import { GrokBotInferenceClient, usageFromState } from "./upstream.mjs";
 
 export function createApp(config = {}) {
@@ -28,13 +29,21 @@ export function createApp(config = {}) {
 
   return async function app(req, res) {
     try {
+      if (req.method === "GET" && req.url === "/favicon.ico") {
+        noContent(res);
+        return;
+      }
+      if (req.method === "GET" && matchesPath(req.url, ["/", "/dashboard", "/v1"])) {
+        html(res, 200, dashboardHtml(req, runtime));
+        return;
+      }
       if (req.method === "GET" && req.url === "/health") {
-        json(res, 200, { ok: true, model: runtime.publicModel, active: runtime.active });
+        json(res, 200, healthPayload(runtime));
         return;
       }
       if (req.method === "GET" && matchesPath(req.url, ["/v1/models", "/models"])) {
         requireAuth(req, runtime.key);
-        json(res, 200, modelsResponse(runtime.publicModel));
+        json(res, 200, modelsResponse());
         return;
       }
       if (req.method === "POST" && matchesPath(req.url, ["/v1/responses", "/responses", "/backend-api/codex/responses"])) {
@@ -67,7 +76,7 @@ async function handleResponses(req, res, runtime) {
   runtime.active = true;
   try {
     const body = await readJsonBody(req, runtime.maxBodyBytes);
-    const request = normalizeResponsesRequest(body, { publicModel: runtime.publicModel });
+    const request = normalizeResponsesRequest(body, { defaultModel: runtime.publicModel });
     const credentials = await runtime.credentialProvider.get();
     if (request.stream) {
       await streamResponse(res, runtime, request, credentials);
@@ -80,7 +89,7 @@ async function handleResponses(req, res, runtime) {
 }
 
 async function streamResponse(res, runtime, request, credentials) {
-  const writer = new ResponseSseWriter(res, request, runtime.publicModel);
+  const writer = new ResponseSseWriter(res, request, request.model);
   writer.start();
   let finalState;
   try {
@@ -104,7 +113,7 @@ async function jsonResponse(res, runtime, request, credentials) {
     if (event.type === "done") finalState = event.state;
   }
   if (!finalState) throw new AppError("upstream_missing_terminal", "Grok Bot upstream did not return a terminal frame", 502);
-  json(res, 200, nonStreamingResponse(runtime.publicModel, text || finalState.text, usageFromState(finalState)));
+  json(res, 200, nonStreamingResponse(request.model, text || finalState.text, usageFromState(finalState)));
 }
 
 function requireAuth(req, key) {
@@ -140,6 +149,112 @@ function logStreamError(request, error) {
     errorStatus: appError.status,
     errorMessage: appError.message
   }));
+}
+
+function healthPayload(runtime) {
+  return {
+    ok: true,
+    default_model: runtime.publicModel,
+    model_count: modelList().length,
+    active: runtime.active,
+    auth_configured: Boolean(runtime.key)
+  };
+}
+
+function dashboardHtml(req, runtime) {
+  const health = healthPayload(runtime);
+  const baseUrl = process.env.GROKBOT_PUBLIC_BASE_URL || apiBaseUrl(req);
+  const rows = modelList().map((item) => {
+    const metadata = item.metadata || {};
+    return `<tr>
+      <td><code>${escapeHtml(item.id)}</code></td>
+      <td>${escapeHtml(item.display_name || item.id)}</td>
+      <td>${escapeHtml(metadata.status || "")}</td>
+      <td>${escapeHtml(metadata.catalog_status || "")}</td>
+      <td>${escapeHtml(String(metadata.context_window || ""))}</td>
+    </tr>`;
+  }).join("");
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GrokBot2API</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f6f7f9; color: #17181c; }
+    main { max-width: 1120px; margin: 0 auto; padding: 32px 20px 48px; }
+    h1 { margin: 0 0 8px; font-size: 30px; font-weight: 700; }
+    h2 { margin: 28px 0 12px; font-size: 18px; }
+    .muted { color: #667085; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 20px 0 8px; }
+    .metric { border: 1px solid #d6dbe3; border-radius: 8px; padding: 14px; background: #fff; }
+    .label { color: #667085; font-size: 12px; }
+    .value { margin-top: 6px; font-size: 18px; font-weight: 650; overflow-wrap: anywhere; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #d6dbe3; border-radius: 8px; overflow: hidden; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #edf0f4; font-size: 14px; }
+    th { background: #eef2f7; font-size: 12px; text-transform: uppercase; color: #526071; }
+    tr:last-child td { border-bottom: 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    @media (max-width: 760px) { main { padding: 24px 14px 36px; } .grid { grid-template-columns: 1fr 1fr; } th, td { padding: 8px; font-size: 12px; } }
+    @media (prefers-color-scheme: dark) {
+      body { background: #111318; color: #f5f7fb; }
+      .muted, .label { color: #a7b0be; }
+      .metric, table { background: #181b22; border-color: #343945; }
+      th { background: #202633; color: #b9c2d0; }
+      th, td { border-bottom-color: #303541; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>GrokBot2API</h1>
+    <p class="muted">Read-only test dashboard. API requests still require the bearer key.</p>
+    <section class="grid">
+      <div class="metric"><div class="label">Default model</div><div class="value">${escapeHtml(health.default_model)}</div></div>
+      <div class="metric"><div class="label">Models</div><div class="value">${health.model_count}</div></div>
+      <div class="metric"><div class="label">Active request</div><div class="value">${health.active ? "yes" : "no"}</div></div>
+      <div class="metric"><div class="label">Auth configured</div><div class="value">${health.auth_configured ? "yes" : "no"}</div></div>
+    </section>
+    <h2>API Base</h2>
+    <p><code>${escapeHtml(baseUrl)}</code></p>
+    <h2>Models</h2>
+    <table>
+      <thead><tr><th>Model</th><th>Name</th><th>Status</th><th>Catalog</th><th>Context</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </main>
+</body>
+</html>`;
+}
+
+function apiBaseUrl(req) {
+  const host = req.headers.host || "127.0.0.1";
+  const proto = req.headers["x-forwarded-proto"] || "http";
+  const prefix = String(req.headers["x-forwarded-prefix"] || "").replace(/\/$/, "");
+  return `${proto}://${host}${prefix}/v1`;
+}
+
+function html(res, status, body) {
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-cache, no-transform"
+  });
+  res.end(body);
+}
+
+function noContent(res) {
+  res.writeHead(204, { "cache-control": "no-cache, no-transform" });
+  res.end();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function validateBind(host, env) {

@@ -24,7 +24,8 @@ export class GrokBotInferenceClient {
     const state = emptyDecodeState();
     const body = connectEnvelope(buildInferenceRequest({
       messages: request.messages,
-      upstreamModel: this.upstreamModel,
+      upstreamModel: request.upstreamModel || this.upstreamModel,
+      parameters: request.parameters,
       maxTokens: request.maxTokens,
       invocationId: crypto.randomUUID(),
       conversationId: crypto.randomUUID()

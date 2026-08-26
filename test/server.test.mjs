@@ -11,7 +11,29 @@ test("serves models behind bearer auth", async () => {
     assert.equal(denied.status, 401);
     const allowed = await request(server, "GET", "/v1/models", null, authHeaders());
     assert.equal(allowed.status, 200);
-    assert.equal(allowed.body.data[0].id, "grok-4.5");
+    assert.equal(allowed.body.data.length, 34);
+    assert.equal(allowed.body.data.some((item) => item.id === "default"), false);
+    const grok45 = allowed.body.data.find((item) => item.id === "grok-4.5");
+    const grok46 = allowed.body.data.find((item) => item.id === "grok-4.6");
+    assert.equal(grok45.metadata.verification, "verified");
+    assert.equal(grok45.metadata.status, "enabled");
+    assert.equal(grok46.metadata.verification, "catalog_entitled");
+    assert.equal(grok46.metadata.status, "experimental");
+    assert.deepEqual(grok46.metadata.parameters.effort, ["low", "medium", "high", "xhigh"]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("serves a read-only dashboard without bearer auth", async () => {
+  const server = await listen();
+  try {
+    const response = await request(server, "GET", "/dashboard", null, {});
+    assert.equal(response.status, 200);
+    assert.match(response.raw, /GrokBot2API/);
+    assert.match(response.raw, /grok-4\.6/);
+    assert.match(response.raw, /catalog_entitled/);
+    assert.doesNotMatch(response.raw, /test-key/);
   } finally {
     await close(server);
   }
@@ -51,6 +73,57 @@ test("streams Grok CLI compatible Responses text events with terminal usage", as
     assert.equal(events.at(-1).data.response.output[0].content[0].text, "hello");
     assert.equal(events.at(-1).data.response.usage.total_tokens, 13);
     assert.deepEqual(events.at(-1).data.response.usage.input_tokens_details, { cached_tokens: 4 });
+  } finally {
+    await close(server);
+  }
+});
+
+test("maps model parameters for catalog models", async () => {
+  const seen = [];
+  const server = await listen({
+    upstream: {
+      async *stream(request) {
+        seen.push(request);
+        yield { type: "done", state: fakeState("") };
+      }
+    }
+  });
+  try {
+    const response = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.6",
+      stream: false,
+      effort: "xhigh",
+      fast: false,
+      input: "Say ok."
+    }, authHeaders());
+    assert.equal(response.status, 200);
+    assert.equal(seen[0].model, "grok-4.6");
+    assert.equal(seen[0].upstreamModel, "grok-4.6");
+    assert.deepEqual(seen[0].parameters, { effort: "xhigh", fast: false });
+  } finally {
+    await close(server);
+  }
+});
+
+test("rejects unsupported model parameters before upstream calls", async () => {
+  let calls = 0;
+  const server = await listen({
+    upstream: {
+      async *stream() {
+        calls += 1;
+        yield { type: "done", state: fakeState("") };
+      }
+    }
+  });
+  try {
+    const response = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      effort: "xhigh",
+      input: "Say ok."
+    }, authHeaders());
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error.code, "unsupported_model_parameter");
+    assert.equal(calls, 0);
   } finally {
     await close(server);
   }

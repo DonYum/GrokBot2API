@@ -17,10 +17,12 @@ Grok CLI 1.0.5 custom-model contract was verified locally: with
 `tools`, `reasoning`, `include`, and `prompt_cache_key`.
 
 - `GET /health`
+- `GET /`, `/dashboard`, and `/v1` read-only dashboard
 - `GET /v1/models` and `/models`
 - `POST /v1/responses`, `/responses`, and `/backend-api/codex/responses`
 - streaming SSE for text deltas and terminal `response.completed`
 - non-streaming JSON Responses output
+- 34 named catalog models in `/v1/models`, excluding `Auto`
 - real upstream usage propagation when present
 - structured error mapping
 - single in-flight request guard
@@ -33,6 +35,12 @@ It only claims Grok CLI text-stream compatibility. Tool-call round trip,
 tool-result handling, cancellation, disconnect semantics, and long-running Linux
 credential refresh are P1/P2 gates before treating it as a complete daily Grok
 CLI backend.
+
+`/v1/models` includes the 34 named models observed from the current Grok Bot
+`USER_AVAILABLE` catalog. `grok-4.5` is marked `verified`; the other catalog
+models are marked `catalog_entitled` / `experimental` until each selected model
+gets a controlled live smoke. The `default` / `Auto` entry is intentionally not
+exposed.
 
 ## Run locally
 
@@ -66,6 +74,15 @@ api_key = "local-dev-key"
 api_backend = "responses"
 context_window = 1000000
 ```
+
+Dashboard:
+
+```sh
+open http://127.0.0.1:8793/dashboard
+```
+
+When running behind a path proxy, set `GROKBOT_PUBLIC_BASE_URL` so the dashboard
+shows the correct client base URL.
 
 ## Credential providers
 
