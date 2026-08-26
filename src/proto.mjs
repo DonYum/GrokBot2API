@@ -68,7 +68,8 @@ export function buildInferenceRequest(input) {
     protoField(4, 2, modelConfig),
     protoField(6, 2, input.invocationId),
     protoField(7, 2, requestedModel),
-    protoField(8, 2, input.conversationId)
+    protoField(8, 2, input.conversationId),
+    ...acceptedToolNames(input.tools).map((name) => protoField(9, 2, name))
   ]);
 }
 
@@ -97,6 +98,13 @@ function agentTools(tools = []) {
       protoField(3, 2, structValue(tool.parameters || {}))
     ])];
   });
+}
+
+function acceptedToolNames(tools = []) {
+  const names = tools
+    .map((tool) => typeof tool?.name === "string" ? tool.name.trim() : "")
+    .filter(Boolean);
+  return [...new Set(names)];
 }
 
 function toolCalls(role, calls = []) {
