@@ -41,14 +41,46 @@ test("streams Grok CLI compatible Responses text events with terminal usage", as
       "response.output_text.delta",
       "response.output_text.delta",
       "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
       "response.completed"
     ]);
-    assert.deepEqual(events.map((event) => event.data.sequence_number), [0, 1, 2, 3, 4, 5, 6, 7]);
+    assert.deepEqual(events.map((event) => event.data.sequence_number), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert.equal(events[0].data.response.created_at > 0, true);
     assert.equal(events.at(-1).data.response.status, "completed");
     assert.equal(events.at(-1).data.response.output[0].content[0].text, "hello");
     assert.equal(events.at(-1).data.response.usage.total_tokens, 13);
     assert.deepEqual(events.at(-1).data.response.usage.input_tokens_details, { cached_tokens: 4 });
+  } finally {
+    await close(server);
+  }
+});
+
+test("starts and closes a text item when upstream returns empty text", async () => {
+  const server = await listen({
+    upstream: fakeUpstream([
+      { type: "done", state: fakeState("") }
+    ])
+  });
+  try {
+    const response = await request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: true,
+      input: "Say nothing."
+    }, authHeaders());
+    assert.equal(response.status, 200);
+    const events = parseSse(response.raw);
+    assert.deepEqual(events.map((event) => event.event), [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.completed"
+    ]);
+    assert.deepEqual(events.map((event) => event.data.sequence_number), [0, 1, 2, 3, 4, 5, 6, 7]);
   } finally {
     await close(server);
   }

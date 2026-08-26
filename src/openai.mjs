@@ -97,21 +97,7 @@ export class ResponseSseWriter {
   delta(text) {
     if (!text) return;
     this.text += text;
-    if (!this.textStarted) {
-      this.textStarted = true;
-      this.event("response.output_item.added", {
-        type: "response.output_item.added",
-        output_index: 0,
-        item: messageItem(this.id, "in_progress", [])
-      });
-      this.event("response.content_part.added", {
-        type: "response.content_part.added",
-        item_id: messageItemId(this.id),
-        output_index: 0,
-        content_index: 0,
-        part: { type: "output_text", text: "", annotations: [] }
-      });
-    }
+    this.ensureTextStarted();
     this.event("response.output_text.delta", {
       type: "response.output_text.delta",
       item_id: messageItemId(this.id),
@@ -123,7 +109,9 @@ export class ResponseSseWriter {
 
   complete(usage) {
     this.usage = usage;
-    if (!this.textStarted) this.delta("");
+    this.ensureTextStarted();
+    const part = { type: "output_text", text: this.text, annotations: [] };
+    const item = messageItem(this.id, "completed", [part]);
     this.event("response.output_text.done", {
       type: "response.output_text.done",
       item_id: messageItemId(this.id),
@@ -131,7 +119,19 @@ export class ResponseSseWriter {
       content_index: 0,
       text: this.text
     });
-    const output = [messageItem(this.id, "completed", [{ type: "output_text", text: this.text, annotations: [] }])];
+    this.event("response.content_part.done", {
+      type: "response.content_part.done",
+      item_id: messageItemId(this.id),
+      output_index: 0,
+      content_index: 0,
+      part
+    });
+    this.event("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: 0,
+      item
+    });
+    const output = [item];
     this.event("response.completed", {
       type: "response.completed",
       response: {
@@ -140,6 +140,23 @@ export class ResponseSseWriter {
       }
     });
     this.close();
+  }
+
+  ensureTextStarted() {
+    if (this.textStarted) return;
+    this.textStarted = true;
+    this.event("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: messageItem(this.id, "in_progress", [])
+    });
+    this.event("response.content_part.added", {
+      type: "response.content_part.added",
+      item_id: messageItemId(this.id),
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] }
+    });
   }
 
   fail(error) {
