@@ -61,15 +61,20 @@ export function buildInferenceRequest(input) {
     protoField(2, 0, 1),
     ...modelParameters(input.parameters).map(([id, value]) => protoField(3, 2, modelParameter(id, value)))
   ]);
-  const modelConfig = protoMessage([protoField(1, 0, input.maxTokens || 4096)]);
   return protoMessage([
     ...input.messages.map((message) => protoField(1, 2, coreMessage(roleNumber(message.role), message.text, message.toolCalls, message.toolResults))),
     ...agentTools(input.tools).map((tool) => protoField(2, 2, tool)),
-    protoField(4, 2, modelConfig),
+    ...modelConfigFields(input.maxTokens),
     protoField(6, 2, input.invocationId),
     protoField(7, 2, requestedModel),
-    protoField(8, 2, input.conversationId)
+    protoField(8, 2, input.conversationId),
+    ...(input.conversationGroupId ? [protoField(12, 2, input.conversationGroupId)] : [])
   ]);
+}
+
+function modelConfigFields(maxTokens) {
+  if (!Number.isInteger(maxTokens) || maxTokens <= 0) return [];
+  return [protoField(4, 2, protoMessage([protoField(1, 0, maxTokens)]))];
 }
 
 function modelParameters(parameters = {}) {

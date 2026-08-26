@@ -92,7 +92,8 @@ export function buildUpstreamRequestBody(request, upstreamModel) {
     parameters: request.parameters,
     maxTokens: request.maxTokens,
     invocationId: crypto.randomUUID(),
-    conversationId: crypto.randomUUID()
+    conversationId: request.conversationId || crypto.randomUUID(),
+    conversationGroupId: request.conversationGroupId
   }));
 }
 
