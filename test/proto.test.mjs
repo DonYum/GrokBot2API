@@ -16,6 +16,7 @@ test("encodes an inference request and decodes text/usage frames", () => {
     upstreamModel: "grok-4.5",
     invocationId: "00000000-0000-4000-8000-000000000001",
     conversationId: "00000000-0000-4000-8000-000000000002",
+    conversationGroupId: "00000000-0000-4000-8000-000000000003",
     parameters: { effort: "xhigh", fast: false },
     messages: [
       { role: "system", text: "Follow instructions." },
@@ -27,6 +28,8 @@ test("encodes an inference request and decodes text/usage frames", () => {
   assert.match(request.toString("utf8"), /grok-4\.5/);
   assert.match(request.toString("utf8"), /xhigh/);
   assert.match(request.toString("utf8"), /false/);
+  assert.equal(topLevelField(request, 4).length, 1);
+  assert.equal(Buffer.from(topLevelField(request, 12)[0].value).toString("utf8"), "00000000-0000-4000-8000-000000000003");
 
   const textFrame = protoMessage([protoField(1, 2, protoMessage([protoField(1, 2, "hello")]))]);
   const usageFrame = protoMessage([protoField(3, 2, protoMessage([
@@ -45,6 +48,27 @@ test("encodes an inference request and decodes text/usage frames", () => {
   assert.equal(state.frames, 3);
   assert.equal(state.endFrames, 1);
   assert.deepEqual(state.usage, { inputTokens: 10, outputTokens: 3, totalTokens: 13 });
+});
+
+test("omits model config and advertised-tool field defaults", () => {
+  const request = buildInferenceRequest({
+    upstreamModel: "grok-4.5",
+    invocationId: "00000000-0000-4000-8000-000000000001",
+    conversationId: "00000000-0000-4000-8000-000000000002",
+    conversationGroupId: "00000000-0000-4000-8000-000000000003",
+    parameters: { effort: "high", fast: true },
+    tools: [{
+      name: "list_dir",
+      description: "List a directory.",
+      parameters: { type: "object" }
+    }],
+    messages: [{ role: "user", text: "List files." }]
+  });
+
+  assert.equal(topLevelField(request, 2).length, 1);
+  assert.equal(topLevelField(request, 4).length, 0);
+  assert.equal(topLevelField(request, 9).length, 0);
+  assert.equal(Buffer.from(topLevelField(request, 12)[0].value).toString("utf8"), "00000000-0000-4000-8000-000000000003");
 });
 
 test("encodes function tools and decodes tool call stream parts", () => {
@@ -98,3 +122,7 @@ test("encodes function tools and decodes tool call stream parts", () => {
     index: 0
   }]);
 });
+
+function topLevelField(bytes, number) {
+  return parseProto(bytes).filter((field) => field.number === number);
+}

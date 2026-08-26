@@ -25,7 +25,8 @@ export function normalizeResponsesRequest(body, config = {}) {
     tools: responseTools(body.tools),
     messages: responseInputMessages(body),
     instructions: typeof body.instructions === "string" ? body.instructions : "",
-    maxTokens: integerOr(body.max_output_tokens, config.maxTokens || 4096)
+    maxTokens: integerOr(body.max_output_tokens, config.maxTokens),
+    ...conversationIds(body)
   };
 }
 
@@ -139,9 +140,33 @@ function responseTools(tools) {
     return [{
       name,
       description: typeof spec.description === "string" ? spec.description : "",
-      parameters: isRecord(spec.parameters) ? spec.parameters : {}
+      parameters: sanitizeJsonSchema(isRecord(spec.parameters) ? spec.parameters : {})
     }];
   });
+}
+
+export function sanitizeJsonSchema(schema) {
+  if (!isRecord(schema)) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (["$schema", "default", "definitions", "markdownDescription", "additionalProperties"].includes(key)) continue;
+    if (key === "items" && Array.isArray(value)) {
+      out.prefixItems = value.map(sanitizeSchemaValue);
+      continue;
+    }
+    if (key === "additionalItems" && Array.isArray(schema.items)) {
+      out.items = sanitizeSchemaValue(value);
+      continue;
+    }
+    out[key] = sanitizeSchemaValue(value);
+  }
+  return out;
+}
+
+function sanitizeSchemaValue(value) {
+  if (Array.isArray(value)) return value.map(sanitizeSchemaValue);
+  if (isRecord(value)) return sanitizeJsonSchema(value);
+  return value;
 }
 
 export class ResponseSseWriter {
@@ -414,4 +439,28 @@ function integerOr(value, fallback) {
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function conversationIds(body) {
+  const key = [
+    stringFrom(body.prompt_cache_key),
+    stringFrom(body.previous_response_id),
+    stringFrom(body.conversation_id),
+    stringFrom(body.session_id),
+    stringFrom(body.metadata?.conversation_id),
+    stringFrom(body.metadata?.session_id)
+  ].find(Boolean);
+  const base = key || crypto.randomUUID();
+  return {
+    conversationId: stableUuid("conversation", base),
+    conversationGroupId: stableUuid("conversation-group", base)
+  };
+}
+
+function stableUuid(namespace, value) {
+  const bytes = crypto.createHash("sha256").update(`${namespace}:${value}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

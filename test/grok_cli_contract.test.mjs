@@ -17,7 +17,9 @@ test("current Grok CLI can consume the sidecar Responses stream", { skip: !exist
         seen.push({
           model: request.model,
           messageCount: request.messages.length,
-          maxTokens: request.maxTokens
+          maxTokens: request.maxTokens,
+          conversationId: request.conversationId,
+          conversationGroupId: request.conversationGroupId
         });
         yield { type: "text", text: "GROK_CLI_COMPAT_OK" };
         yield { type: "done", state: fakeState("GROK_CLI_COMPAT_OK") };
@@ -32,6 +34,8 @@ test("current Grok CLI can consume the sidecar Responses stream", { skip: !exist
     assert.ok(seen.some((request) => request.model === "grok-4.5"));
     assert.ok(seen.every((request) => ["grok-4.5", "grok-4.6"].includes(request.model)));
     assert.ok(seen.some((request) => request.messageCount >= 1));
+    assert.ok(seen.every((request) => request.conversationId));
+    assert.ok(seen.every((request) => request.conversationGroupId));
   } finally {
     await close(server);
   }
@@ -44,7 +48,10 @@ test("current Grok CLI executes a Responses function call and returns tool outpu
       async *stream(request) {
         seen.push({
           tools: request.tools.map((tool) => tool.name),
-          hasToolResult: request.messages.some((message) => Array.isArray(message.toolResults) && message.toolResults.length > 0)
+          hasToolResult: request.messages.some((message) => Array.isArray(message.toolResults) && message.toolResults.length > 0),
+          conversationId: request.conversationId,
+          conversationGroupId: request.conversationGroupId,
+          maxTokens: request.maxTokens
         });
         if (request.tools.some((tool) => tool.name === "list_dir") && !seen.at(-1).hasToolResult) {
           yield { type: "tool_call_done", id: "call_list", name: "list_dir", args: "{\"target_directory\":\".\"}", index: 0 };
@@ -62,6 +69,9 @@ test("current Grok CLI executes a Responses function call and returns tool outpu
     assert.match(result.stdout, /GROK_CLI_TOOL_ROUNDTRIP_OK/);
     assert.equal(seen.some((request) => request.tools.includes("list_dir")), true);
     assert.equal(seen.some((request) => request.hasToolResult), true);
+    const toolLoop = seen.filter((request) => request.tools.includes("list_dir") || request.hasToolResult);
+    assert.equal(new Set(toolLoop.map((request) => request.conversationId)).size, 1);
+    assert.equal(new Set(toolLoop.map((request) => request.conversationGroupId)).size, 1);
   } finally {
     await close(server);
   }

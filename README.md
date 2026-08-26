@@ -23,6 +23,9 @@ Grok CLI 1.0.5 custom-model contract was verified locally: with
 - streaming SSE for text deltas and terminal `response.completed`
 - function tool definitions, tool-call SSE events, and function-call-output
   continuation
+- official-style tool request shaping: sanitized JSON schemas, stable per-session
+  conversation IDs, conversation group IDs, no default max-token override, and
+  no advertised-tool duplication into field 9
 - non-streaming JSON Responses output
 - 34 named catalog models in `/v1/models`, excluding `Auto`
 - real upstream usage propagation when present
