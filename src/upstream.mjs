@@ -23,15 +23,21 @@ export class GrokBotInferenceClient {
   async *stream(request, credentials) {
     const state = emptyDecodeState();
     const body = buildUpstreamRequestBody(request, this.upstreamModel);
-    const response = await this.open(credentials, body);
+    const upstreamRequestId = request.requestId || crypto.randomUUID();
+    const response = await this.open(credentials, body, upstreamRequestId);
     if (response.status !== 200) {
+      const meta = {
+        upstreamErrorSource: "http",
+        upstreamHttpStatus: response.status,
+        upstreamOriginalCode: `http_${response.status}`
+      };
       if (response.status === 429) {
-        throw rateLimitError();
+        throw rateLimitError(undefined, meta);
       }
       if (hardStopStatus(response.status)) {
-        throw new AppError(`hard_stop_http_${response.status}`, `Grok Bot upstream returned ${response.status}`, 503);
+        throw new AppError(`hard_stop_http_${response.status}`, `Grok Bot upstream returned ${response.status}`, 503, "api_error", meta);
       }
-      throw new AppError(`upstream_http_${response.status}`, `Grok Bot upstream returned ${response.status}`, 502);
+      throw new AppError(`upstream_http_${response.status}`, `Grok Bot upstream returned ${response.status}`, 502, "api_error", meta);
     }
 
     const decoder = new ConnectFrameDecoder();
@@ -48,15 +54,19 @@ export class GrokBotInferenceClient {
     if (state.errors.length > 0) {
       const first = state.errors[0];
       const code = String(first.code || "").toLowerCase();
+      const meta = {
+        upstreamErrorSource: "connect_end_frame",
+        upstreamOriginalCode: String(first.code || "upstream_stream_error")
+      };
       if (code === "resource_exhausted" || code === "rate_limited") {
-        throw rateLimitError();
+        throw rateLimitError(undefined, meta);
       }
-      throw new AppError(String(first.code || "upstream_stream_error"), first.message || "Grok Bot upstream stream error", 502);
+      throw new AppError(String(first.code || "upstream_stream_error"), first.message || "Grok Bot upstream stream error", 502, "api_error", meta);
     }
     yield { type: "done", state };
   }
 
-  open(credentials, body) {
+  open(credentials, body, requestId = crypto.randomUUID()) {
     return new Promise((resolve, reject) => {
       const request = https.request(this.backend, {
         method: "POST",
@@ -70,7 +80,7 @@ export class GrokBotInferenceClient {
           "x-cursor-client-version": credentials.clientVersion || "0.27.0",
           "x-sand-box-namespace": "prod",
           "x-ghost-mode": "true",
-          "x-request-id": crypto.randomUUID(),
+          "x-request-id": requestId,
           "content-length": String(body.length)
         },
         timeout: this.timeoutMs

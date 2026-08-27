@@ -378,14 +378,16 @@ test("maps non-streaming upstream resource exhaustion to 429 and cools down", as
     }
   });
   try {
-    const first = await request(server, "POST", "/v1/responses", {
+    const logs = [];
+    const first = await captureConsoleError(logs, () => request(server, "POST", "/v1/responses", {
       model: "grok-4.5",
       stream: false,
       input: "Say ok."
-    }, authHeaders());
+    }, authHeaders()));
     assert.equal(first.status, 429);
     assert.equal(first.body.error.type, "rate_limit_error");
     assert.equal(first.body.error.code, "upstream_rate_limited");
+    assert.equal(logs.length, 1);
 
     const second = await request(server, "POST", "/v1/responses", {
       model: "grok-4.5",
@@ -408,16 +410,18 @@ test("maps upstream stream failures to SSE error events", async () => {
     })
   });
   try {
-    const response = await request(server, "POST", "/v1/responses", {
+    const logs = [];
+    const response = await captureConsoleError(logs, () => request(server, "POST", "/v1/responses", {
       model: "grok-4.5",
       input: "Say ok."
-    }, authHeaders());
+    }, authHeaders()));
     const events = parseSse(response.raw);
     assert.equal(response.status, 200);
     assert.equal(events.at(-1).event, "error");
     assert.equal(events.at(-1).data.error.type, "rate_limit_error");
     assert.equal(events.at(-1).data.error.code, "upstream_rate_limited");
     assert.equal(events.at(-1).data.error.status, 429);
+    assert.equal(logs.length, 1);
   } finally {
     await close(server);
   }
@@ -434,16 +438,18 @@ test("maps streaming upstream resource exhaustion to SSE 429 and cools down", as
     })
   });
   try {
-    const first = await request(server, "POST", "/v1/responses", {
+    const logs = [];
+    const first = await captureConsoleError(logs, () => request(server, "POST", "/v1/responses", {
       model: "grok-4.5",
       input: "Say ok."
-    }, authHeaders());
+    }, authHeaders()));
     const events = parseSse(first.raw);
     assert.equal(first.status, 200);
     assert.equal(events.at(-1).event, "error");
     assert.equal(events.at(-1).data.error.type, "rate_limit_error");
     assert.equal(events.at(-1).data.error.code, "upstream_rate_limited");
     assert.equal(events.at(-1).data.error.status, 429);
+    assert.equal(logs.length, 1);
 
     const second = await request(server, "POST", "/v1/responses", {
       model: "grok-4.5",
@@ -452,6 +458,116 @@ test("maps streaming upstream resource exhaustion to SSE 429 and cools down", as
     assert.equal(second.status, 429);
     assert.equal(second.body.error.code, "upstream_rate_limited");
     assert.equal(calls, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("logs desensitized streaming upstream error metadata", async () => {
+  const logs = [];
+  const server = await listen({
+    rateLimitCooldownMs: 0,
+    upstream: fakeUpstream(async function* () {
+      yield { type: "text", text: "partial" };
+      throw new AppError("resource_exhausted", "raw upstream exhausted", 502, "api_error", {
+        upstreamErrorSource: "connect_end_frame",
+        upstreamOriginalCode: "resource_exhausted"
+      });
+    })
+  });
+  try {
+    const response = await captureConsoleError(logs, () => request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: true,
+      tools: [{
+        type: "function",
+        function: {
+          name: "secret_live_tool_name",
+          description: "Tool description that must not be logged.",
+          parameters: {
+            type: "object",
+            properties: { secret_schema_arg: { type: "string" } }
+          }
+        }
+      }],
+      input: "secret prompt that must not be logged"
+    }, authHeaders()));
+    assert.equal(response.status, 200);
+    const events = parseSse(response.raw);
+    assert.equal(events.at(-1).event, "error");
+
+    assert.equal(logs.length, 1);
+    const entry = JSON.parse(logs[0]);
+    assert.equal(entry.event, "grokbot2api_stream_error");
+    assert.equal(typeof entry.requestId, "string");
+    assert.equal(entry.model, "grok-4.5");
+    assert.equal(entry.messageCount, 1);
+    assert.equal(entry.hasTools, true);
+    assert.equal(entry.toolsCount, 1);
+    assert.equal(typeof entry.requestBodyBytes, "number");
+    assert.equal(typeof entry.durationMs, "number");
+    assert.equal(entry.upstreamErrorSource, "connect_end_frame");
+    assert.equal(entry.upstreamHttpStatus, null);
+    assert.equal(entry.upstreamOriginalCode, "resource_exhausted");
+    assert.equal(entry.errorType, "rate_limit_error");
+    assert.equal(entry.errorCode, "upstream_rate_limited");
+    assert.equal(entry.errorStatus, 429);
+    assert.doesNotMatch(logs[0], /secret prompt/);
+    assert.doesNotMatch(logs[0], /secret_live_tool_name/);
+    assert.doesNotMatch(logs[0], /secret_schema_arg/);
+  } finally {
+    await close(server);
+  }
+});
+
+test("logs desensitized non-streaming request error metadata", async () => {
+  const logs = [];
+  const server = await listen({
+    upstream: {
+      async *stream() {
+        throw new AppError("upstream_http_502", "raw upstream bad gateway", 502, "api_error", {
+          upstreamErrorSource: "http",
+          upstreamHttpStatus: 502,
+          upstreamOriginalCode: "http_502"
+        });
+      }
+    }
+  });
+  try {
+    const response = await captureConsoleError(logs, () => request(server, "POST", "/v1/responses", {
+      model: "grok-4.5",
+      stream: false,
+      tools: [{
+        type: "function",
+        function: {
+          name: "hidden_request_tool",
+          parameters: { type: "object", properties: { hidden_arg: { type: "string" } } }
+        }
+      }],
+      input: "hidden non-stream input"
+    }, authHeaders()));
+    assert.equal(response.status, 502);
+    assert.equal(response.body.error.code, "upstream_http_502");
+
+    assert.equal(logs.length, 1);
+    const entry = JSON.parse(logs[0]);
+    assert.equal(entry.event, "grokbot2api_request_error");
+    assert.equal(typeof entry.requestId, "string");
+    assert.equal(entry.model, "grok-4.5");
+    assert.equal(entry.messageCount, 1);
+    assert.equal(entry.hasTools, true);
+    assert.equal(entry.toolsCount, 1);
+    assert.equal(typeof entry.requestBodyBytes, "number");
+    assert.equal(typeof entry.durationMs, "number");
+    assert.equal(entry.upstreamErrorSource, "http");
+    assert.equal(entry.upstreamHttpStatus, 502);
+    assert.equal(entry.upstreamOriginalCode, "http_502");
+    assert.equal(entry.errorType, "api_error");
+    assert.equal(entry.errorCode, "upstream_http_502");
+    assert.equal(entry.errorStatus, 502);
+    assert.doesNotMatch(logs[0], /hidden non-stream input/);
+    assert.doesNotMatch(logs[0], /hidden_request_tool/);
+    assert.doesNotMatch(logs[0], /hidden_arg/);
   } finally {
     await close(server);
   }
@@ -541,6 +657,16 @@ function authHeaders() {
 function fakeJwt() {
   const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
   return `header.${payload}.signature`;
+}
+
+async function captureConsoleError(logs, fn) {
+  const original = console.error;
+  console.error = (...args) => logs.push(args.join(" "));
+  try {
+    return await fn();
+  } finally {
+    console.error = original;
+  }
 }
 
 function close(server) {
