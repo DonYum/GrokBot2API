@@ -1,10 +1,11 @@
 export class AppError extends Error {
-  constructor(code, message = code, status = 500, type = "api_error") {
+  constructor(code, message = code, status = 500, type = "api_error", meta = {}) {
     super(message);
     this.name = "AppError";
     this.code = code;
     this.status = status;
     this.type = type;
+    this.meta = meta;
   }
 }
 
@@ -41,6 +42,6 @@ export function isRateLimitLikeError(error) {
   ].includes(code);
 }
 
-export function rateLimitError(message = "Grok Bot upstream rate limit exceeded; retry later") {
-  return new AppError("upstream_rate_limited", message, 429, "rate_limit_error");
+export function rateLimitError(message = "Grok Bot upstream rate limit exceeded; retry later", meta = {}) {
+  return new AppError("upstream_rate_limited", message, 429, "rate_limit_error", meta);
 }

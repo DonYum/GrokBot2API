@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import http from "node:http";
 import { createCredentialProvider } from "./credentials.mjs";
 import { AppError, errorFromUnknown, isRateLimitLikeError, rateLimitError } from "./errors.mjs";
@@ -84,9 +85,14 @@ async function handleResponses(req, res, runtime) {
     throw new AppError("concurrency_limited", "Only one Grok Bot request may run at a time", 429, "rate_limit_error");
   }
   runtime.active = true;
+  const startedAt = Date.now();
+  let request = null;
   try {
     const body = await readJsonBody(req, runtime.maxBodyBytes);
-    const request = normalizeResponsesRequest(body, { defaultModel: runtime.publicModel });
+    request = normalizeResponsesRequest(body.value, { defaultModel: runtime.publicModel });
+    request.requestId = request.requestId || crypto.randomUUID();
+    request.requestBodyBytes = body.bytes;
+    request.startedAt = startedAt;
     const credentials = await runtime.credentialProvider.get();
     if (request.stream) {
       await streamResponse(res, runtime, request, credentials);
@@ -96,6 +102,7 @@ async function handleResponses(req, res, runtime) {
   } catch (error) {
     const appError = appErrorForClient(error);
     applyRateLimitCooldown(runtime, appError);
+    if (request) logRequestError(request, appError, startedAt);
     throw appError;
   } finally {
     runtime.active = false;
@@ -162,7 +169,7 @@ async function readJsonBody(req, maxBytes) {
     chunks.push(chunk);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return { value: JSON.parse(Buffer.concat(chunks).toString("utf8")), bytes: length };
   } catch {
     throw new AppError("invalid_json", "Invalid JSON request body", 400, "invalid_request_error");
   }
@@ -199,7 +206,7 @@ export function rateLimitCooldownMsFromEnv(env = process.env) {
 
 function appErrorForClient(error) {
   const appError = errorFromUnknown(error, "upstream_error");
-  return isRateLimitLikeError(appError) ? rateLimitError() : appError;
+  return isRateLimitLikeError(appError) ? rateLimitError(undefined, appError.meta || {}) : appError;
 }
 
 function applyRateLimitCooldown(runtime, error) {
@@ -211,12 +218,40 @@ function logStreamError(request, error) {
   const appError = errorFromUnknown(error, "upstream_error");
   console.error(JSON.stringify({
     event: "grokbot2api_stream_error",
+    requestId: request.requestId || null,
     model: request.model,
     messageCount: request.messages.length,
+    hasTools: Array.isArray(request.tools) && request.tools.length > 0,
+    toolsCount: Array.isArray(request.tools) ? request.tools.length : 0,
+    requestBodyBytes: request.requestBodyBytes ?? null,
+    durationMs: request.startedAt ? Date.now() - request.startedAt : null,
+    upstreamErrorSource: appError.meta?.upstreamErrorSource || null,
+    upstreamHttpStatus: appError.meta?.upstreamHttpStatus || null,
+    upstreamOriginalCode: appError.meta?.upstreamOriginalCode || null,
     errorType: appError.type,
     errorCode: appError.code,
     errorStatus: appError.status,
     errorMessage: appError.message
+  }));
+}
+
+function logRequestError(request, error, startedAt) {
+  const appError = errorFromUnknown(error, "upstream_error");
+  console.error(JSON.stringify({
+    event: "grokbot2api_request_error",
+    requestId: request.requestId || null,
+    model: request.model,
+    messageCount: request.messages.length,
+    hasTools: Array.isArray(request.tools) && request.tools.length > 0,
+    toolsCount: Array.isArray(request.tools) ? request.tools.length : 0,
+    requestBodyBytes: request.requestBodyBytes ?? null,
+    durationMs: Date.now() - startedAt,
+    upstreamErrorSource: appError.meta?.upstreamErrorSource || null,
+    upstreamHttpStatus: appError.meta?.upstreamHttpStatus || null,
+    upstreamOriginalCode: appError.meta?.upstreamOriginalCode || null,
+    errorType: appError.type,
+    errorCode: appError.code,
+    errorStatus: appError.status
   }));
 }
 
